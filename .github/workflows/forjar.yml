@@ -84,3 +84,20 @@ jobs:
           FORJA_CERT_PFX_B64: ${{ secrets.FORJA_CERT_PFX_B64 }}
           FORJA_CERT_CLAVE: ${{ secrets.FORJA_CERT_CLAVE }}
         run: node kit/tools/forja-robot.js --id "$env:ID" --codigo "$env:CODIGO" --version "$env:VERSION"
+
+      # 28-oct: si algo falla ANTES de que el robot pueda avisar (p. ej. no existe el kit de esa versión), la API se
+      # enteraba solo por el tiempo (horas). Este paso avisa «fallida» al momento, firmado igual que el robot. Si el robot
+      # ya avisó, la API lo rechaza sin daño (ya no está «forjando»).
+      - name: Avisar a la API si falló antes del robot
+        if: failure()
+        continue-on-error: true
+        shell: pwsh
+        env:
+          FORJA_SECRETO_ROBOT: ${{ secrets.FORJA_SECRETO_ROBOT }}
+        run: |
+          $motivo = if (Test-Path kit) { 'No se pudo preparar la forja. Pídela otra vez; no se tocó nada de lo que tus jugadores ya tienen.' } else { "Falta el kit de la versión $env:VERSION del launcher. Maguet ya está avisado; pídela otra vez en un rato." }
+          $cuerpo = @{ estado = 'fallida'; motivo = $motivo } | ConvertTo-Json -Compress
+          $fecha = [string][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+          $hmac = New-Object System.Security.Cryptography.HMACSHA256 (,[Text.Encoding]::UTF8.GetBytes($env:FORJA_SECRETO_ROBOT))
+          $firma = -join ($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes("maguet-forja`n1`n$fecha`n$env:ID`n$cuerpo")) | ForEach-Object { $_.ToString('x2') })
+          Invoke-RestMethod -Method Post -Uri "https://api.maguetcorp.com/v1/robot/forja/$env:ID" -ContentType 'application/json' -Body $cuerpo -Headers @{ 'x-maguet-fecha' = $fecha; 'x-maguet-firma' = $firma }
